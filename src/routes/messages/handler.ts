@@ -59,6 +59,7 @@ export async function handleCompletion(c: Context) {
       messageStartSent: false,
       contentBlockIndex: 0,
       contentBlockOpen: false,
+      reasoningBlockOpen: false,
       toolCalls: {},
     }
 

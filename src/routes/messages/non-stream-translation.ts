@@ -43,6 +43,7 @@ export function translateToOpenAI(
     user: payload.metadata?.user_id,
     tools: translateAnthropicToolsToOpenAI(payload.tools),
     tool_choice: translateAnthropicToolChoiceToOpenAI(payload.tool_choice),
+    reasoning_effort: translateThinkingToReasoningEffort(payload.thinking),
   }
 }
 
@@ -54,6 +55,26 @@ function translateModelName(model: string): string {
     return model.replace(/^claude-opus-4-.*/, "claude-opus-4")
   }
   return model
+}
+
+function translateThinkingToReasoningEffort(
+  thinking: AnthropicMessagesPayload["thinking"],
+): "low" | "medium" | "high" | undefined {
+  // AnthropicMessagesPayload currently models only { type: "enabled" }.
+  // Avoid checking thinking.type here because eslint treats it as a redundant
+  // condition; if the API adds new variants, widen the type first.
+  if (!thinking) {
+    return undefined
+  }
+
+  const budget = thinking.budget_tokens
+  if (budget === undefined || budget >= 10000) {
+    return "high"
+  }
+  if (budget >= 4000) {
+    return "medium"
+  }
+  return "low"
 }
 
 function translateAnthropicMessagesToOpenAI(
@@ -143,15 +164,8 @@ function handleAssistantMessage(
     (block): block is AnthropicTextBlock => block.type === "text",
   )
 
-  const thinkingBlocks = message.content.filter(
-    (block): block is AnthropicThinkingBlock => block.type === "thinking",
-  )
-
-  // Combine text and thinking blocks, as OpenAI doesn't have separate thinking blocks
-  const allTextContent = [
-    ...textBlocks.map((b) => b.text),
-    ...thinkingBlocks.map((b) => b.thinking),
-  ].join("\n\n")
+  // Strip thinking blocks - OpenAI doesn't support thinking in message history
+  const allTextContent = textBlocks.map((b) => b.text).join("\n\n")
 
   return toolUseBlocks.length > 0 ?
       [
@@ -191,11 +205,8 @@ function mapContent(
   const hasImage = content.some((block) => block.type === "image")
   if (!hasImage) {
     return content
-      .filter(
-        (block): block is AnthropicTextBlock | AnthropicThinkingBlock =>
-          block.type === "text" || block.type === "thinking",
-      )
-      .map((block) => (block.type === "text" ? block.text : block.thinking))
+      .filter((block): block is AnthropicTextBlock => block.type === "text")
+      .map((block) => block.text)
       .join("\n\n")
   }
 
@@ -204,11 +215,6 @@ function mapContent(
     switch (block.type) {
       case "text": {
         contentParts.push({ type: "text", text: block.text })
-
-        break
-      }
-      case "thinking": {
-        contentParts.push({ type: "text", text: block.thinking })
 
         break
       }
@@ -282,14 +288,19 @@ export function translateToAnthropic(
   response: ChatCompletionResponse,
 ): AnthropicResponse {
   // Merge content from all choices
+  const allThinkingBlocks: Array<AnthropicThinkingBlock> = []
   const allTextBlocks: Array<AnthropicTextBlock> = []
   const allToolUseBlocks: Array<AnthropicToolUseBlock> = []
   let stopReason: "stop" | "length" | "tool_calls" | "content_filter" | null =
     null // default
   stopReason = response.choices[0]?.finish_reason ?? stopReason
 
-  // Process all choices to extract text and tool use blocks
+  // Process all choices to extract thinking, text and tool use blocks
   for (const choice of response.choices) {
+    allThinkingBlocks.push(
+      ...getAnthropicThinkingBlocks(choice.message.reasoning_content),
+    )
+
     const textBlocks = getAnthropicTextBlocks(choice.message.content)
     const toolUseBlocks = getAnthropicToolUseBlocks(choice.message.tool_calls)
 
@@ -302,14 +313,13 @@ export function translateToAnthropic(
     }
   }
 
-  // Note: GitHub Copilot doesn't generate thinking blocks, so we don't include them in responses
-
   return {
     id: response.id,
     type: "message",
     role: "assistant",
     model: response.model,
-    content: [...allTextBlocks, ...allToolUseBlocks],
+    // Thinking blocks come first, then text, then tool_use (Anthropic ordering)
+    content: [...allThinkingBlocks, ...allTextBlocks, ...allToolUseBlocks],
     stop_reason: mapOpenAIStopReasonToAnthropic(stopReason),
     stop_sequence: null,
     usage: {
@@ -340,6 +350,16 @@ function getAnthropicTextBlocks(
   }
 
   return []
+}
+
+function getAnthropicThinkingBlocks(
+  reasoningContent: string | null | undefined,
+): Array<AnthropicThinkingBlock> {
+  if (reasoningContent === undefined || reasoningContent === null) {
+    return []
+  }
+
+  return [{ type: "thinking", thinking: reasoningContent }]
 }
 
 function getAnthropicToolUseBlocks(

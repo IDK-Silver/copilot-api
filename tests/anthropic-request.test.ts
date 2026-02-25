@@ -50,6 +50,7 @@ const chatCompletionRequestSchema = z.object({
   tools: z.array(z.any()).optional(),
   tool_choice: z.union([z.string(), z.object({})]).optional(),
   user: z.string().optional(),
+  reasoning_effort: z.enum(["low", "medium", "high"]).optional().nullable(),
 })
 
 /**
@@ -60,6 +61,15 @@ const chatCompletionRequestSchema = z.object({
 function isValidChatCompletionRequest(payload: unknown): boolean {
   const result = chatCompletionRequestSchema.safeParse(payload)
   return result.success
+}
+
+function makeThinkingPayload(budget_tokens?: number): AnthropicMessagesPayload {
+  return {
+    model: "claude-sonnet-4",
+    messages: [{ role: "user", content: "test" }],
+    max_tokens: 1024,
+    thinking: { type: "enabled", budget_tokens },
+  }
 }
 
 describe("Anthropic to OpenAI translation logic", () => {
@@ -125,7 +135,7 @@ describe("Anthropic to OpenAI translation logic", () => {
     expect(isValidChatCompletionRequest(openAIPayload)).toBe(false)
   })
 
-  test("should handle thinking blocks in assistant messages", () => {
+  test("should strip thinking blocks from assistant messages", () => {
     const anthropicPayload: AnthropicMessagesPayload = {
       model: "claude-3-5-sonnet-20241022",
       messages: [
@@ -146,17 +156,17 @@ describe("Anthropic to OpenAI translation logic", () => {
     const openAIPayload = translateToOpenAI(anthropicPayload)
     expect(isValidChatCompletionRequest(openAIPayload)).toBe(true)
 
-    // Check that thinking content is combined with text content
+    // Check that thinking content is stripped, not merged
     const assistantMessage = openAIPayload.messages.find(
       (m) => m.role === "assistant",
     )
-    expect(assistantMessage?.content).toContain(
+    expect(assistantMessage?.content).not.toContain(
       "Let me think about this simple math problem...",
     )
     expect(assistantMessage?.content).toContain("2+2 equals 4.")
   })
 
-  test("should handle thinking blocks with tool calls", () => {
+  test("should strip thinking blocks with tool calls", () => {
     const anthropicPayload: AnthropicMessagesPayload = {
       model: "claude-3-5-sonnet-20241022",
       messages: [
@@ -184,11 +194,11 @@ describe("Anthropic to OpenAI translation logic", () => {
     const openAIPayload = translateToOpenAI(anthropicPayload)
     expect(isValidChatCompletionRequest(openAIPayload)).toBe(true)
 
-    // Check that thinking content is included in the message content
+    // Check that thinking content is stripped
     const assistantMessage = openAIPayload.messages.find(
       (m) => m.role === "assistant",
     )
-    expect(assistantMessage?.content).toContain(
+    expect(assistantMessage?.content).not.toContain(
       "I need to call the weather API",
     )
     expect(assistantMessage?.content).toContain(
@@ -196,6 +206,39 @@ describe("Anthropic to OpenAI translation logic", () => {
     )
     expect(assistantMessage?.tool_calls).toHaveLength(1)
     expect(assistantMessage?.tool_calls?.[0].function.name).toBe("get_weather")
+  })
+
+  test("should translate thinking to reasoning_effort high by default", () => {
+    const anthropicPayload: AnthropicMessagesPayload = {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "Think about this" }],
+      max_tokens: 1024,
+      thinking: { type: "enabled" },
+    }
+    const openAIPayload = translateToOpenAI(anthropicPayload)
+    expect(openAIPayload.reasoning_effort).toBe("high")
+  })
+
+  test("should map budget_tokens to reasoning_effort levels", () => {
+    expect(translateToOpenAI(makeThinkingPayload(12000)).reasoning_effort).toBe(
+      "high",
+    )
+    expect(translateToOpenAI(makeThinkingPayload(5000)).reasoning_effort).toBe(
+      "medium",
+    )
+    expect(translateToOpenAI(makeThinkingPayload(2000)).reasoning_effort).toBe(
+      "low",
+    )
+  })
+
+  test("should not include reasoning_effort when thinking is absent", () => {
+    const anthropicPayload: AnthropicMessagesPayload = {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "Hello" }],
+      max_tokens: 1024,
+    }
+    const openAIPayload = translateToOpenAI(anthropicPayload)
+    expect(openAIPayload.reasoning_effort).toBeUndefined()
   })
 })
 

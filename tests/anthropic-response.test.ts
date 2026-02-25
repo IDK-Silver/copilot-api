@@ -20,6 +20,11 @@ const anthropicContentBlockTextSchema = z.object({
   text: z.string(),
 })
 
+const anthropicContentBlockThinkingSchema = z.object({
+  type: z.literal("thinking"),
+  thinking: z.string(),
+})
+
 const anthropicContentBlockToolUseSchema = z.object({
   type: z.literal("tool_use"),
   id: z.string(),
@@ -33,6 +38,7 @@ const anthropicMessageResponseSchema = z.object({
   role: z.literal("assistant"),
   content: z.array(
     z.union([
+      anthropicContentBlockThinkingSchema,
       anthropicContentBlockTextSchema,
       anthropicContentBlockToolUseSchema,
     ]),
@@ -251,6 +257,7 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       messageStartSent: false,
       contentBlockIndex: 0,
       contentBlockOpen: false,
+      reasoningBlockOpen: false,
       toolCalls: {},
     }
     const translatedStream = openAIStream.flatMap((chunk) =>
@@ -351,6 +358,7 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       messageStartSent: false,
       contentBlockIndex: 0,
       contentBlockOpen: false,
+      reasoningBlockOpen: false,
       toolCalls: {},
     }
     const translatedStream = openAIStream.flatMap((chunk) =>
@@ -361,5 +369,348 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     for (const event of translatedStream) {
       expect(isValidAnthropicStreamEvent(event)).toBe(true)
     }
+  })
+})
+
+describe("Reasoning/Thinking Support", () => {
+  test("should translate reasoning_content to thinking blocks in non-streaming response", () => {
+    const openAIResponse: ChatCompletionResponse = {
+      id: "chatcmpl-reason-1",
+      object: "chat.completion",
+      created: 1677652288,
+      model: "claude-sonnet-4",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "The answer is 42.",
+            reasoning_content: "Let me think about this carefully...",
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 50,
+        total_tokens: 60,
+      },
+    }
+
+    const anthropicResponse = translateToAnthropic(openAIResponse)
+
+    expect(isValidAnthropicResponse(anthropicResponse)).toBe(true)
+
+    // Thinking block should come first
+    expect(anthropicResponse.content[0].type).toBe("thinking")
+    if (anthropicResponse.content[0].type === "thinking") {
+      expect(anthropicResponse.content[0].thinking).toBe(
+        "Let me think about this carefully...",
+      )
+    }
+
+    // Text block should come second
+    expect(anthropicResponse.content[1].type).toBe("text")
+    if (anthropicResponse.content[1].type === "text") {
+      expect(anthropicResponse.content[1].text).toBe("The answer is 42.")
+    }
+  })
+
+  test("should handle non-streaming response without reasoning_content", () => {
+    const openAIResponse: ChatCompletionResponse = {
+      id: "chatcmpl-no-reason",
+      object: "chat.completion",
+      created: 1677652288,
+      model: "claude-sonnet-4",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "Hello!",
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: {
+        prompt_tokens: 5,
+        completion_tokens: 3,
+        total_tokens: 8,
+      },
+    }
+
+    const anthropicResponse = translateToAnthropic(openAIResponse)
+
+    expect(isValidAnthropicResponse(anthropicResponse)).toBe(true)
+    expect(anthropicResponse.content).toHaveLength(1)
+    expect(anthropicResponse.content[0].type).toBe("text")
+  })
+
+  test("should translate streaming reasoning_content to thinking events", () => {
+    const openAIStream: Array<ChatCompletionChunk> = [
+      {
+        id: "cmpl-reason",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "claude-sonnet-4",
+        choices: [
+          {
+            index: 0,
+            delta: { role: "assistant" },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      {
+        id: "cmpl-reason",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "claude-sonnet-4",
+        choices: [
+          {
+            index: 0,
+            delta: { reasoning_content: "Thinking about " },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      {
+        id: "cmpl-reason",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "claude-sonnet-4",
+        choices: [
+          {
+            index: 0,
+            delta: { reasoning_content: "the answer..." },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      {
+        id: "cmpl-reason",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "claude-sonnet-4",
+        choices: [
+          {
+            index: 0,
+            delta: { content: "The answer is 42." },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      {
+        id: "cmpl-reason",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "claude-sonnet-4",
+        choices: [
+          { index: 0, delta: {}, finish_reason: "stop", logprobs: null },
+        ],
+      },
+    ]
+
+    const streamState: AnthropicStreamState = {
+      messageStartSent: false,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      reasoningBlockOpen: false,
+      toolCalls: {},
+    }
+    const translatedStream = openAIStream.flatMap((chunk) =>
+      translateChunkToAnthropicEvents(chunk, streamState),
+    )
+
+    for (const event of translatedStream) {
+      expect(isValidAnthropicStreamEvent(event)).toBe(true)
+    }
+
+    // Verify thinking block start exists
+    const thinkingStart = translatedStream.find(
+      (e) =>
+        e.type === "content_block_start"
+        && "content_block" in e
+        && e.content_block.type === "thinking",
+    )
+    expect(thinkingStart).toBeDefined()
+
+    // Verify thinking deltas
+    const thinkingDeltas = translatedStream.filter(
+      (e) =>
+        e.type === "content_block_delta"
+        && "delta" in e
+        && e.delta.type === "thinking_delta",
+    )
+    expect(thinkingDeltas).toHaveLength(2)
+
+    // Verify text block appears after thinking
+    const textStart = translatedStream.find(
+      (e) =>
+        e.type === "content_block_start"
+        && "content_block" in e
+        && e.content_block.type === "text",
+    )
+    expect(textStart).toBeDefined()
+
+    // Verify ordering: thinking block index < text block index
+    if (
+      thinkingStart
+      && "index" in thinkingStart
+      && textStart
+      && "index" in textStart
+    ) {
+      expect(thinkingStart.index).toBeLessThan(textStart.index)
+    }
+  })
+})
+
+describe("Reasoning/Thinking Support Streaming Edge Cases", () => {
+  test("should ignore reasoning_content while tool call arguments are streaming", () => {
+    const openAIStream: Array<ChatCompletionChunk> = [
+      {
+        id: "cmpl-tool-reason",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "claude-sonnet-4",
+        choices: [
+          {
+            index: 0,
+            delta: { role: "assistant" },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      {
+        id: "cmpl-tool-reason",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "claude-sonnet-4",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "call_1",
+                  type: "function",
+                  function: { name: "get_weather", arguments: "" },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      {
+        id: "cmpl-tool-reason",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "claude-sonnet-4",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [{ index: 0, function: { arguments: '{"loc' } }],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      {
+        id: "cmpl-tool-reason",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "claude-sonnet-4",
+        choices: [
+          {
+            index: 0,
+            delta: { reasoning_content: "Need weather lookup first." },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      {
+        id: "cmpl-tool-reason",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "claude-sonnet-4",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                { index: 0, function: { arguments: 'ation":"Paris"}' } },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      {
+        id: "cmpl-tool-reason",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "claude-sonnet-4",
+        choices: [
+          { index: 0, delta: {}, finish_reason: "tool_calls", logprobs: null },
+        ],
+      },
+    ]
+
+    const streamState: AnthropicStreamState = {
+      messageStartSent: false,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      reasoningBlockOpen: false,
+      toolCalls: {},
+    }
+    const translatedStream = openAIStream.flatMap((chunk) =>
+      translateChunkToAnthropicEvents(chunk, streamState),
+    )
+
+    for (const event of translatedStream) {
+      expect(isValidAnthropicStreamEvent(event)).toBe(true)
+    }
+
+    const thinkingEvents = translatedStream.filter(
+      (event) =>
+        (event.type === "content_block_start"
+          && "content_block" in event
+          && event.content_block.type === "thinking")
+        || (event.type === "content_block_delta"
+          && "delta" in event
+          && event.delta.type === "thinking_delta"),
+    )
+    expect(thinkingEvents).toHaveLength(0)
+
+    const toolArgDeltas = translatedStream.filter(
+      (event) =>
+        event.type === "content_block_delta"
+        && "delta" in event
+        && event.delta.type === "input_json_delta",
+    )
+    expect(toolArgDeltas).toHaveLength(2)
+    for (const event of toolArgDeltas) {
+      expect(event.index).toBe(0)
+    }
+
+    const stopEvents = translatedStream.filter(
+      (event) => event.type === "content_block_stop",
+    )
+    expect(stopEvents).toHaveLength(1)
+    expect(stopEvents[0]?.index).toBe(0)
   })
 })

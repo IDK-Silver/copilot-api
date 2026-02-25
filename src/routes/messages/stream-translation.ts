@@ -16,6 +16,10 @@ function isToolBlockOpen(state: AnthropicStreamState): boolean {
   )
 }
 
+function hasDeltaText(value: string | null | undefined): value is string {
+  return value !== undefined && value !== null
+}
+
 // eslint-disable-next-line max-lines-per-function, complexity
 export function translateChunkToAnthropicEvents(
   chunk: ChatCompletionChunk,
@@ -57,7 +61,55 @@ export function translateChunkToAnthropicEvents(
     state.messageStartSent = true
   }
 
-  if (delta.content) {
+  // Handle reasoning_content -> thinking blocks
+  // Anthropic tool_use blocks cannot be reopened, so drop interleaved reasoning
+  // while a tool JSON block is streaming to preserve a valid event sequence.
+  if (hasDeltaText(delta.reasoning_content) && !isToolBlockOpen(state)) {
+    // If a non-reasoning block was open, close it first
+    if (state.contentBlockOpen && !state.reasoningBlockOpen) {
+      events.push({
+        type: "content_block_stop",
+        index: state.contentBlockIndex,
+      })
+      state.contentBlockIndex++
+      state.contentBlockOpen = false
+    }
+
+    if (!state.contentBlockOpen) {
+      events.push({
+        type: "content_block_start",
+        index: state.contentBlockIndex,
+        content_block: {
+          type: "thinking",
+          thinking: "",
+        },
+      })
+      state.contentBlockOpen = true
+      state.reasoningBlockOpen = true
+    }
+
+    events.push({
+      type: "content_block_delta",
+      index: state.contentBlockIndex,
+      delta: {
+        type: "thinking_delta",
+        thinking: delta.reasoning_content,
+      },
+    })
+  }
+
+  if (hasDeltaText(delta.content)) {
+    // Close reasoning block before starting text block
+    if (state.contentBlockOpen && state.reasoningBlockOpen) {
+      events.push({
+        type: "content_block_stop",
+        index: state.contentBlockIndex,
+      })
+      state.contentBlockIndex++
+      state.contentBlockOpen = false
+      state.reasoningBlockOpen = false
+    }
+
     if (isToolBlockOpen(state)) {
       // A tool block was open, so close it before starting a text block.
       events.push({
@@ -91,6 +143,17 @@ export function translateChunkToAnthropicEvents(
   }
 
   if (delta.tool_calls) {
+    // Close reasoning block before tool calls
+    if (state.contentBlockOpen && state.reasoningBlockOpen) {
+      events.push({
+        type: "content_block_stop",
+        index: state.contentBlockIndex,
+      })
+      state.contentBlockIndex++
+      state.contentBlockOpen = false
+      state.reasoningBlockOpen = false
+    }
+
     for (const toolCall of delta.tool_calls) {
       if (toolCall.id && toolCall.function?.name) {
         // New tool call starting.
@@ -149,6 +212,7 @@ export function translateChunkToAnthropicEvents(
         index: state.contentBlockIndex,
       })
       state.contentBlockOpen = false
+      state.reasoningBlockOpen = false
     }
 
     events.push(
