@@ -8,6 +8,7 @@ import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
 import {
   createChatCompletions,
+  normalizeReasoningFields,
   type ChatCompletionChunk,
   type ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
@@ -74,6 +75,9 @@ export async function handleCompletion(c: Context) {
       }
 
       const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
+      for (const choice of chunk.choices) {
+        normalizeReasoningFields(choice.delta)
+      }
       const events = translateChunkToAnthropicEvents(chunk, streamState)
 
       for (const event of events) {

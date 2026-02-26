@@ -9,6 +9,8 @@ import { state } from "~/lib/state"
 import { isNullish } from "~/lib/utils"
 import {
   createChatCompletions,
+  normalizeReasoningFields,
+  type ChatCompletionChunk,
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
@@ -46,6 +48,13 @@ export async function handleCompletion(c: Context) {
   consola.debug("Streaming response")
   return streamSSE(c, async (stream) => {
     for await (const chunk of response) {
+      if (chunk.data && chunk.data !== "[DONE]") {
+        const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
+        for (const choice of parsed.choices) {
+          normalizeReasoningFields(choice.delta)
+        }
+        chunk.data = JSON.stringify(parsed)
+      }
       consola.debug("Streaming chunk:", JSON.stringify(chunk))
       await stream.writeSSE(chunk as SSEMessage)
     }

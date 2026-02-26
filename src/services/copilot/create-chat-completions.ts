@@ -52,6 +52,9 @@ export const createChatCompletions = async (
   }
 
   const result = (await response.json()) as ChatCompletionResponse
+  for (const choice of result.choices) {
+    normalizeReasoningFields(choice.message)
+  }
   const elapsed = ((Date.now() - start) / 1000).toFixed(1)
   const usage = result.usage
   consola.info(
@@ -207,5 +210,18 @@ export interface ImagePart {
   image_url: {
     url: string
     detail?: "low" | "high" | "auto"
+  }
+}
+
+/**
+ * Copilot gateway returns `reasoning_text` instead of the OpenAI standard
+ * `reasoning_content`. Normalize to `reasoning_content` for compatibility.
+ */
+export function normalizeReasoningFields(obj: object): void {
+  const raw = obj as Record<string, unknown>
+  if ("reasoning_text" in raw) {
+    raw.reasoning_content = raw.reasoning_text
+    delete raw.reasoning_text
+    delete raw.reasoning_opaque
   }
 }
