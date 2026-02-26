@@ -28,6 +28,14 @@ export const createChatCompletions = async (
     "X-Initiator": isAgentCall ? "agent" : "user",
   }
 
+  const initiator = isAgentCall ? "agent" : "user"
+  const reasoning = payload.reasoning_effort ?? "none"
+  const stream = payload.stream ? "stream" : "sync"
+  consola.info(
+    `<-- ${payload.model} | initiator=${initiator} | reasoning=${reasoning} | vision=${enableVision ? "yes" : "no"} | ${stream}`,
+  )
+
+  const start = Date.now()
   const response = await fetch(`${copilotBaseUrl(state)}/chat/completions`, {
     method: "POST",
     headers,
@@ -43,7 +51,14 @@ export const createChatCompletions = async (
     return events(response)
   }
 
-  return (await response.json()) as ChatCompletionResponse
+  const result = (await response.json()) as ChatCompletionResponse
+  const elapsed = ((Date.now() - start) / 1000).toFixed(1)
+  const usage = result.usage
+  consola.info(
+    `--> ${response.status} ${elapsed}s | tokens: in=${usage?.prompt_tokens ?? 0} out=${usage?.completion_tokens ?? 0}`,
+  )
+
+  return result
 }
 
 // Streaming types
