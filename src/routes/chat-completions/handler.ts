@@ -6,7 +6,6 @@ import { streamSSE, type SSEMessage } from "hono/streaming"
 import { awaitApproval } from "~/lib/approval"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
-import { getTokenCount } from "~/lib/tokenizer"
 import { isNullish } from "~/lib/utils"
 import {
   createChatCompletions,
@@ -25,17 +24,7 @@ export async function handleCompletion(c: Context) {
     (model) => model.id === payload.model,
   )
 
-  // Calculate and display token count
-  try {
-    if (selectedModel) {
-      const tokenCount = await getTokenCount(payload, selectedModel)
-      consola.info("Current token count:", tokenCount)
-    } else {
-      consola.warn("No model selected, skipping token count calculation")
-    }
-  } catch (error) {
-    consola.warn("Failed to calculate token count:", error)
-  }
+  // Token count calculated by createChatCompletions log output
 
   if (state.manualApprove) await awaitApproval()
 
